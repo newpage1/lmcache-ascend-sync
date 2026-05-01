@@ -1,0 +1,71 @@
+name: LMCache Upstream Sync Monitor
+
+on:
+  schedule:
+    # Run daily at 6:00 UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      target_version:
+        description: 'Specific upstream version to analyze (e.g., v0.4.4)'
+        required: false
+        type: string
+      check_only:
+        description: 'Only check for new releases, skip analysis'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync-monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "lmcache-ascend-sync[bot]"
+          git config --global user.email "bot@lmcache-ascend-sync.dev"
+
+      - name: Check for new releases
+        if: ${{ inputs.check_only == true }}
+        run: python -m src.sync_monitor --check-only
+
+      - name: Run full sync (auto)
+        if: ${{ inputs.check_only != true && inputs.target_version == '' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python -m src.sync_monitor
+
+      - name: Run sync for specific version
+        if: ${{ inputs.target_version != '' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python -m src.sync_monitor --analyze ${{ inputs.target_version }}
+
+      - name: Upload state artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-state
+          path: state.json
+          retention-days: 30

@@ -1,0 +1,51 @@
+# LMCache-Ascend Sync configuration
+
+upstream:
+  repo: "LMCache/LMCache"
+  # Monitor these release tag patterns
+  tag_patterns:
+    - "^v0\\..*$"       # stable releases
+  # Check frequency
+  schedule: "0 6 * * *"  # daily at 6am UTC
+  # Only monitor releases newer than this
+  min_version: "v0.3.7"
+
+downstream:
+  repo: "LMCache/LMCache-Ascend"
+  # Branch to target for PRs
+  target_branch: "main"
+  # PR branch prefix
+  branch_prefix: "sync/upstream-"
+
+sync:
+  # Local checkout paths (used by both Actions and local runner)
+  upstream_checkout: "/tmp/lmcache-sync/upstream"
+  downstream_checkout: "/tmp/lmcache-sync/downstream"
+
+  # Rebase simulation
+  rebase:
+    enabled: true
+    # Max conflicts to attempt auto-resolve
+    max_conflicts: 10
+
+  # PR generation
+  pr:
+    labels:
+      - "automated-sync"
+      - "upstream-adaptation"
+    draft: false
+    # Title template: {version} is replaced with upstream version
+    title_template: "chore: adapt to upstream LMCache {version}"
+
+# Claude API for code generation
+# Set via environment variable ANTHROPIC_API_KEY
+claude:
+  model: "claude-sonnet-4-20250514"
+  max_tokens: 8192
+
+# Notification (optional)
+notification:
+  # Set to true to enable GitHub issue comment on roadmap issue
+  github_issue_comment: false
+  issue_repo: "LMCache/LMCache-Ascend"
+  issue_number: 126

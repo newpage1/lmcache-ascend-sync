@@ -1,0 +1,122 @@
+# LMCache-Ascend monkey-patch coverage points
+# These are the exact modules/classes/functions that LMCache-Ascend overrides.
+# The conflict analyzer will diff these specific paths between upstream versions.
+
+patch_points:
+  # 1. C++ kernel replacement: lmcache.c_ops -> lmcache_ascend.c_ops
+  - module: "lmcache/c_ops"
+    type: "sys.modules_replace"
+    ascend_replacement: "lmcache_ascend/c_ops"
+    description: "CUDA kernels replaced by CANN kernels at import time"
+    key_functions:
+      - "multi_layer_kv_transfer"
+      - "single_layer_kv_transfer"
+      - "host_register"
+      - "host_unregister"
+
+  # 2. GPU Connector interface - core abstraction
+  - module: "lmcache/v1/gpu_connector/gpu_connectors.py"
+    type: "class_inheritance"
+    description: "GPUConnectorInterface and its CUDA implementations"
+    watch_classes:
+      - class: "GPUConnectorInterface"
+        watch_methods:
+          - "to_gpu"
+          - "from_gpu"
+          - "batched_to_gpu"
+          - "batched_from_gpu"
+          - "get_shape"
+          - "get_item_size"
+          - "get_num_tokens"
+      - class: "VLLMPagedMemGPUConnectorV2"
+        watch_methods:
+          - "_initialize_pointers"
+          - "to_gpu"
+          - "from_gpu"
+          - "__init__"
+      - class: "VLLMBufferLayerwiseGPUConnector"
+        watch_methods:
+          - "to_gpu"
+          - "from_gpu"
+          - "__init__"
+      - class: "VLLMPagedMemLayerwiseGPUConnector"
+        watch_methods:
+          - "batched_to_gpu"
+          - "batched_from_gpu"
+          - "__init__"
+    ascend_file: "lmcache_ascend/v1/npu_connector.py"
+
+  # 3. Memory allocator
+  - module: "lmcache/v1/memory_management.py"
+    type: "class_inheritance"
+    description: "MixedMemoryAllocator and memory allocation interfaces"
+    watch_classes:
+      - class: "MixedMemoryAllocator"
+        watch_methods:
+          - "allocate"
+          - "__init__"
+      - class: "MemoryAllocatorInterface"
+        watch_methods:
+          - "allocate"
+          - "free"
+    ascend_file: "lmcache_ascend/v1/memory_management.py"
+
+  # 4. vLLM adapter
+  - module: "lmcache/integration/vllm/vllm_v1_adapter.py"
+    type: "function_replace"
+    description: "vLLM engine initialization function"
+    watch_functions:
+      - "_init_lmcache_engine"
+      - "init_lmcache_engine"
+    ascend_file: "lmcache_ascend/integration/vllm/vllm_v1_adapter.py"
+
+  # 5. vLLM connector
+  - module: "lmcache/integration/vllm/vllm_v1_adapter.py"
+    type: "class_inheritance"
+    description: "LMCache vLLM connector"
+    watch_classes:
+      - class: "LMCacheConnectorV1Dynamic"
+        watch_methods:
+          - "__init__"
+          - "get_num_blocks"
+    ascend_file: "lmcache_ascend/integration/vllm/lmcache_ascend_connector_v1.py"
+
+  # 6. CacheBlend
+  - module: "lmcache/v1/compute/blend/"
+    type: "class_inheritance"
+    description: "CacheBlend builder and blender"
+    watch_classes:
+      - class: "LMCBlenderBuilder"
+        watch_methods:
+          - "get_or_create"
+    ascend_file: "lmcache_ascend/v1/blend/"
+
+  # 7. Token database
+  - module: "lmcache/v1/token_database.py"
+    type: "function_replace"
+    description: "Token hashing with ASLR workaround"
+    watch_functions:
+      - "TokenDatabase._hash_tokens"
+
+  # 8. NUMA detection
+  - module: "lmcache/v1/system_detection.py"
+    type: "function_replace"
+    description: "NUMA detector with Ascend hardware sanitization"
+    watch_functions:
+      - "NUMADetector._read_from_sys"
+
+  # 9. Cache engine builder
+  - module: "lmcache/v1/cache_engine.py"
+    type: "class_inheritance"
+    description: "LMCacheEngine and LMCacheEngineBuilder"
+    watch_classes:
+      - class: "LMCacheEngineBuilder"
+        watch_methods:
+          - "get_or_create"
+          - "destroy"
+      - class: "LMCacheEngine"
+        watch_methods:
+          - "__init__"
+          - "store"
+          - "retrieve"
+    ascend_file: "lmcache_ascend/v1/cache_engine.py"

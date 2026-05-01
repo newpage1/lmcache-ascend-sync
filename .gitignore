@@ -1,0 +1,21 @@
+# Dependencies
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.venv/
+
+# State (runtime)
+state.json
+
+# Temp checkouts
+/tmp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
