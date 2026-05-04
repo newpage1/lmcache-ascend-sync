@@ -196,7 +196,7 @@ class ConflictAnalyzer:
         if path.exists():
             subprocess.run(["rm", "-rf", str(path)], check=True)
         path.parent.mkdir(parents=True, exist_ok=True)
-        cmd = ["git", "clone", "--depth=0", url, str(path)]
+        cmd = ["git", "clone", url, str(path)]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             logger.error(f"Failed to clone {repo}: {result.stderr}")
