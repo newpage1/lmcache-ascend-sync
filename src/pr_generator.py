@@ -269,27 +269,45 @@ class PRGenerator:
         if result.returncode != 0:
             return {"success": False, "error": f"Git commit failed: {result.stderr}"}
 
-        # Push branch
-        remote_url = f"https://x-access-token:{os.environ.get('GITHUB_TOKEN', '')}@github.com/{self.config['downstream']['repo']}.git"
-        subprocess.run(
-            ["git", "-C", str(downstream_path), "remote", "set-url", "origin", remote_url],
-            capture_output=True,
-        )
-        result = subprocess.run(
-            ["git", "-C", str(downstream_path), "push", "origin", branch_name],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            # Try with gh CLI as fallback
+        # Push branch to fork
+        fork_repo = self.config["downstream"].get("fork")
+        upstream_repo = self.config["downstream"]["repo"]
+
+        if fork_repo:
+            # Add fork as remote and push there
+            fork_url = f"https://github.com/{fork_repo}.git"
+            subprocess.run(
+                ["git", "-C", str(downstream_path), "remote", "add", "fork", fork_url],
+                capture_output=True,
+            )
             result = subprocess.run(
-                ["git", "-C", str(downstream_path), "push", "-u", "origin", branch_name],
+                ["git", "-C", str(downstream_path), "push", "fork", branch_name],
+                capture_output=True,
+                text=True,
+            )
+        else:
+            # Push directly to upstream (requires write access)
+            remote_url = f"https://x-access-token:{os.environ.get('GITHUB_TOKEN', '')}@github.com/{upstream_repo}.git"
+            subprocess.run(
+                ["git", "-C", str(downstream_path), "remote", "set-url", "origin", remote_url],
+                capture_output=True,
+            )
+            result = subprocess.run(
+                ["git", "-C", str(downstream_path), "push", "origin", branch_name],
+                capture_output=True,
+                text=True,
+            )
+
+        if result.returncode != 0:
+            logger.warning(f"Git push failed: {result.stderr}, trying gh CLI...")
+            result = subprocess.run(
+                ["git", "-C", str(downstream_path), "push", "fork" if fork_repo else "origin", branch_name],
                 capture_output=True,
                 text=True,
                 env={**os.environ, "GH_TOKEN": os.environ.get("GITHUB_TOKEN", "")},
             )
 
-        # Create PR via gh CLI
+        # Create PR via gh CLI: from fork to upstream
         pr_body = self._build_pr_body(to_version, analysis, rebase_result)
         title = self.config["sync"]["pr"]["title_template"].format(version=to_version)
         labels = self.config["sync"]["pr"].get("labels", [])
@@ -297,12 +315,17 @@ class PRGenerator:
 
         cmd = [
             "gh", "pr", "create",
-            "--repo", self.config["downstream"]["repo"],
+            "--repo", upstream_repo,
             "--title", title,
             "--body", pr_body,
-            "--head", branch_name,
             "--base", target_branch,
         ]
+        if fork_repo:
+            # head format: owner:branch for cross-repo PR
+            fork_owner = fork_repo.split("/")[0]
+            cmd.extend(["--head", f"{fork_owner}:{branch_name}"])
+        else:
+            cmd.extend(["--head", branch_name])
         if draft:
             cmd.append(draft)
 

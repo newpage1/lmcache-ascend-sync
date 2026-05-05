@@ -12,10 +12,10 @@ upstream:
 
 downstream:
   repo: "LMCache/LMCache-Ascend"
+  # Your fork for pushing branches
+  fork: "newpage1/LMCache-Ascend"
   # Branch to target for PRs
   target_branch: "main"
-  # PR branch prefix
-  branch_prefix: "sync/upstream-"
 
 sync:
   # Local checkout paths (used by both Actions and local runner)
