@@ -1,5 +1,6 @@
 """
-PR Generator - Uses Claude API to generate adaptation code and creates PRs.
+PR Generator - Uses LLM API to generate adaptation code and creates PRs.
+Supports OpenAI-compatible APIs (GLM, DeepSeek, etc.) and Anthropic Claude.
 """
 
 import json
@@ -10,21 +11,23 @@ import textwrap
 from pathlib import Path
 from typing import Optional
 
-import anthropic
-import yaml
+from openai import OpenAI
 
 logger = logging.getLogger("lmcache-sync.pr_generator")
 
 
 class PRGenerator:
-    """Generate adaptation PRs using Claude API."""
+    """Generate adaptation PRs using LLM API (OpenAI-compatible or Anthropic)."""
 
     def __init__(self, config: dict, patch_points: dict):
         self.config = config
         self.patch_points = patch_points
-        self.api_key = os.environ.get("ANTHROPIC_API_KEY")
-        self.model = config.get("claude", {}).get("model", "claude-sonnet-4-20250514")
-        self.max_tokens = config.get("claude", {}).get("max_tokens", 8192)
+
+        llm_config = config.get("llm", {})
+        self.api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+        self.base_url = llm_config.get("base_url", "https://open.bigmodel.cn/api/paas/v4")
+        self.model = llm_config.get("model", "glm-5.1")
+        self.max_tokens = llm_config.get("max_tokens", 8192)
 
     def generate(
         self,
@@ -42,7 +45,7 @@ class PRGenerator:
         - error: str (if failed)
         """
         if not self.api_key:
-            return {"success": False, "error": "ANTHROPIC_API_KEY not set"}
+            return {"success": False, "error": "LLM_API_KEY or OPENAI_API_KEY not set"}
 
         # Read downstream source files for context
         downstream_path = Path(self.config["sync"]["downstream_checkout"])
@@ -57,18 +60,21 @@ class PRGenerator:
             ascend_sources, upstream_diff,
         )
 
-        # Call Claude API
-        logger.info("Calling Claude API to generate adaptation code...")
+        # Call LLM API (OpenAI-compatible)
+        logger.info(f"Calling LLM API ({self.model}) to generate adaptation code...")
         try:
-            client = anthropic.Anthropic(api_key=self.api_key)
-            response = client.messages.create(
+            client = OpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url,
+            )
+            response = client.chat.completions.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
                 messages=[{"role": "user", "content": prompt}],
             )
-            generated = response.content[0].text
+            generated = response.choices[0].message.content
         except Exception as e:
-            return {"success": False, "error": f"Claude API error: {e}"}
+            return {"success": False, "error": f"LLM API error: {e}"}
 
         # Parse the generated code
         file_changes = self._parse_generated_code(generated)

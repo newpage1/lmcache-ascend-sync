@@ -51,14 +51,14 @@ jobs:
       - name: Run full sync (auto)
         if: ${{ inputs.check_only != true && inputs.target_version == '' }}
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python -m src.sync_monitor
 
       - name: Run sync for specific version
         if: ${{ inputs.target_version != '' }}
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python -m src.sync_monitor --analyze ${{ inputs.target_version }}
 
