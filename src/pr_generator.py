@@ -109,28 +109,50 @@ class PRGenerator:
         return self._create_pr(to_version, file_changes, analysis, rebase_result)
 
     def _read_ascend_sources(self, downstream_path: Path) -> dict[str, str]:
-        """Read LMCache-Ascend source files that may need adaptation."""
+        """Read ALL LMCache-Ascend source files for comprehensive context."""
         sources = {}
         ascend_dir = downstream_path / "lmcache_ascend"
         if not ascend_dir.exists():
             return sources
 
-        key_files = [
-            "__init__.py",
-            "v1/npu_connector.py",
-            "v1/cache_engine.py",
-            "v1/memory_management.py",
-            "v1/system_detection.py",
-            "v1/tokens_hash.py",
-            "integration/vllm/lmcache_ascend_connector_v1.py",
-            "integration/vllm/vllm_v1_adapter.py",
-        ]
+        # Recursively read all Python files under lmcache_ascend/
+        for py_file in ascend_dir.rglob("*.py"):
+            rel_path = py_file.relative_to(ascend_dir)
+            try:
+                content = py_file.read_text()
+                # Skip very large files (>50KB) but include their headers
+                if len(content) > 50000:
+                    lines = content.split("\n")
+                    content = "\n".join(lines[:100]) + "\n# ... (truncated, %d lines total)\n" % len(lines)
+                sources[str(rel_path)] = content
+            except Exception:
+                pass
 
-        for rel_path in key_files:
-            full_path = ascend_dir / rel_path
+        # Also read key project files
+        extra_files = [
+            "setup.py",
+            "setup.cfg",
+            "pyproject.toml",
+        ]
+        for fname in extra_files:
+            full_path = downstream_path / fname
             if full_path.exists():
                 try:
-                    sources[rel_path] = full_path.read_text()
+                    sources[fname] = full_path.read_text()
+                except Exception:
+                    pass
+
+        # Read test files
+        tests_dir = downstream_path / "tests"
+        if tests_dir.exists():
+            for py_file in tests_dir.rglob("*.py"):
+                rel_path = py_file.relative_to(downstream_path)
+                try:
+                    content = py_file.read_text()
+                    if len(content) > 10000:
+                        lines = content.split("\n")
+                        content = "\n".join(lines[:50]) + "\n# ... (truncated)\n"
+                    sources[str(rel_path)] = content
                 except Exception:
                     pass
 
@@ -145,7 +167,7 @@ class PRGenerator:
         ascend_sources: dict[str, str],
         upstream_diff: str,
     ) -> str:
-        """Build the Claude API prompt for code generation."""
+        """Build the LLM prompt for code generation."""
         conflicts_text = json.dumps(analysis.get("conflicts", []), indent=2)
         rebase_conflicts = json.dumps(
             rebase_result.get("conflict_files", []), indent=2
@@ -159,14 +181,30 @@ class PRGenerator:
             You are an expert Python developer maintaining LMCache-Ascend, a plugin that adapts
             the upstream LMCache project to run on Huawei Ascend NPUs.
 
-            LMCache-Ascend works by monkey-patching specific upstream modules at import time,
-            replacing CUDA kernels with CANN kernels, and subclassing GPU connectors as NPU connectors.
+            ## How LMCache-Ascend Works
+
+            LMCache-Ascend does NOT fork the upstream repo. Instead, it works by:
+
+            1. **sys.modules replacement**: Replacing `lmcache.c_ops` (CUDA kernels) with `lmcache_ascend.c_ops` (CANN kernels) at import time
+            2. **Factory patching**: Patching `CreateGPUConnector` to return NPU connectors instead of GPU connectors
+            3. **Class replacement**: Replacing `LMCacheConnectorV1Impl` with `LMCacheAscendConnectorV1Impl` and `LMCacheEngine` with `AscendLMCacheEngine`
+            4. **Method monkey-patching**: Overriding specific methods like `wait_for_save`, `get_finished`, `handle_preemptions`
+            5. **Config injection**: Adding Ascend-specific config definitions to `lmcache.v1.config._CONFIG_DEFINITIONS`
+
+            All patches are applied in `lmcache_ascend/__init__.py` when the package is imported.
+
+            Key Ascend-specific patterns:
+            - `torch.npu` instead of `torch.cuda`
+            - `torch.npu.Event` / `torch.npu.stream` instead of CUDA equivalents
+            - CANN kernel calls via `lmcache_ascend.c_ops` (AscendC kernels)
+            - NUMA detection for Ascend hardware topology
+            - Short hash-based socket paths (Ascend path length limits)
 
             ## Task
-            The upstream LMCache has released version {to_version} (currently tracking {from_version}).
-            Analyze the breaking changes and generate updated LMCache-Ascend code.
+            The upstream LMCache has released version {to_version} (Ascend currently tracks {from_version}).
+            Analyze the upstream changes and generate updated LMCache-Ascend code.
 
-            ## Detected Conflicts
+            ## Detected Conflicts (from diff analysis)
             ```json
             {conflicts_text}
             ```
@@ -176,7 +214,7 @@ class PRGenerator:
             {rebase_conflicts}
             ```
 
-            ## Upstream Diff (truncated)
+            ## Upstream Diff ({from_version} -> {to_version})
             ```diff
             {upstream_diff}
             ```
@@ -185,24 +223,30 @@ class PRGenerator:
             {sources_section}
 
             ## Instructions
-            1. For each conflict, determine what changes are needed in the LMCache-Ascend code.
-            2. Generate the COMPLETE updated file content for each affected file.
-            3. Maintain backward compatibility where possible.
-            4. Keep all Ascend-specific logic (NPU device checks, CANN kernel calls, NUMA detection, etc.).
-            5. Update method signatures only when the upstream interface actually changed.
+            1. Study the upstream diff carefully to understand what API changes were made.
+            2. For each file in LMCache-Ascend that needs adaptation:
+               a. If an import path changed upstream, update the Ascend import to match
+               b. If a method signature changed, update the Ascend override to match
+               c. If a new abstract method was added upstream, add a compatible Ascend implementation
+               d. If a class was renamed upstream, update the Ascend patch to reference the new name
+            3. Preserve ALL Ascend-specific logic (NPU device, CANN kernels, NUMA, etc.)
+            4. Preserve the `store_async` feature (AscendLMCacheEngine background thread)
+            5. Update `LMCACHE_UPSTREAM_TAG` in `__init__.py` to `{to_version}`
+            6. Do NOT remove any Ascend-only features or workarounds
 
             ## Output Format
             For each file that needs changes, output EXACTLY:
 
-            <<<FILE: relative/path/to/file.py>>>
+            <<<FILE: lmcache_ascend/relative/path/to/file.py>>>
             # complete file content here
             <<<END>>>
 
+            IMPORTANT: File paths MUST start with `lmcache_ascend/` (not just the filename).
             Only output files that need changes. Do not output unchanged files.
         """)
 
     def _parse_generated_code(self, generated: str) -> dict[str, str]:
-        """Parse the FILE blocks from Claude's response."""
+        """Parse the FILE blocks from LLM response."""
         file_changes = {}
         parts = generated.split("<<<FILE:")
         for part in parts[1:]:  # Skip first (before first marker)
@@ -216,6 +260,18 @@ class PRGenerator:
             content = lines[1]
             # Remove leading/trailing newlines from content
             content = content.strip("\n")
+
+            # Normalize path: ensure it starts with lmcache_ascend/
+            if not file_path.startswith("lmcache_ascend") and not file_path.startswith("tests/"):
+                # Try common prefixes
+                if file_path.startswith("lmcache/"):
+                    # This is an upstream path, skip it - we only write to lmcache_ascend
+                    logger.warning(f"Skipping upstream path in LLM output: {file_path}")
+                    continue
+                # Might be a bare filename, try prepending lmcache_ascend/
+                if not file_path.startswith("/"):
+                    file_path = f"lmcache_ascend/{file_path}"
+
             file_changes[file_path] = content
         return file_changes
 

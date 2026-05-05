@@ -45,7 +45,7 @@ llm:
   api_format: "anthropic"
   base_url: "https://open.bigmodel.cn/api/anthropic"
   model: "GLM-5.1"
-  max_tokens: 8192
+  max_tokens: 16384
 
 # Notification (optional)
 notification:

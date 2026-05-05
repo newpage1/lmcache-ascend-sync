@@ -14,7 +14,7 @@ patch_points:
       - "host_register"
       - "host_unregister"
 
-  # 2. GPU Connector interface - core abstraction
+  # 2. GPU Connector interface - core abstraction (restructured in v0.4.2 to package)
   - module: "lmcache/v1/gpu_connector/gpu_connectors.py"
     type: "class_inheritance"
     description: "GPUConnectorInterface and its CUDA implementations"
@@ -34,6 +34,7 @@ patch_points:
           - "to_gpu"
           - "from_gpu"
           - "__init__"
+          - "from_metadata"
       - class: "VLLMBufferLayerwiseGPUConnector"
         watch_methods:
           - "to_gpu"
@@ -44,7 +45,31 @@ patch_points:
           - "batched_to_gpu"
           - "batched_from_gpu"
           - "__init__"
-    ascend_file: "lmcache_ascend/v1/npu_connector.py"
+      - class: "SGLangNPUConnector"
+        watch_methods:
+          - "__init__"
+      - class: "SGLangLayerwiseNPUConnector"
+        watch_methods:
+          - "__init__"
+    ascend_file: "lmcache_ascend/v1/npu_connector/npu_connectors.py"
+
+  # 2b. GPU Connector utils (LayoutHints added in v0.4.3)
+  - module: "lmcache/v1/gpu_connector/utils.py"
+    type: "function_replace"
+    description: "GPU connector utilities including LayoutHints, permute functions"
+    watch_functions:
+      - "need_gpu_interm_buffer"
+      - "permute_to_contiguous"
+      - "permute_kv_caches_to_contiguous"
+    ascend_file: "lmcache_ascend/v1/npu_connector/utils.py"
+
+  # 2c. GPU Connector factory (CreateGPUConnector added in v0.4.2)
+  - module: "lmcache/v1/gpu_connector/__init__.py"
+    type: "function_replace"
+    description: "CreateGPUConnector factory function"
+    watch_functions:
+      - "CreateGPUConnector"
+    ascend_file: "lmcache_ascend/v1/npu_connector/__init__.py"
 
   # 3. Memory allocator
   - module: "lmcache/v1/memory_management.py"
@@ -61,51 +86,28 @@ patch_points:
           - "free"
     ascend_file: "lmcache_ascend/v1/memory_management.py"
 
-  # 4. vLLM adapter
+  # 4. vLLM adapter - engine initialization (refactored in v0.4.2)
   - module: "lmcache/integration/vllm/vllm_v1_adapter.py"
-    type: "function_replace"
-    description: "vLLM engine initialization function"
+    type: "class_inheritance"
+    description: "LMCacheConnectorV1Impl - vLLM connector implementation"
+    watch_classes:
+      - class: "LMCacheConnectorV1Impl"
+        watch_methods:
+          - "__init__"
+          - "wait_for_save"
+          - "start_load_kv"
+          - "get_finished"
+          - "request_finished"
+      - class: "LMCacheConnectorV1"
+        watch_methods:
+          - "__init__"
+          - "handle_preemptions"
     watch_functions:
       - "_init_lmcache_engine"
       - "init_lmcache_engine"
     ascend_file: "lmcache_ascend/integration/vllm/vllm_v1_adapter.py"
 
-  # 5. vLLM connector
-  - module: "lmcache/integration/vllm/vllm_v1_adapter.py"
-    type: "class_inheritance"
-    description: "LMCache vLLM connector"
-    watch_classes:
-      - class: "LMCacheConnectorV1Dynamic"
-        watch_methods:
-          - "__init__"
-          - "get_num_blocks"
-    ascend_file: "lmcache_ascend/integration/vllm/lmcache_ascend_connector_v1.py"
-
-  # 6. CacheBlend
-  - module: "lmcache/v1/compute/blend/"
-    type: "class_inheritance"
-    description: "CacheBlend builder and blender"
-    watch_classes:
-      - class: "LMCBlenderBuilder"
-        watch_methods:
-          - "get_or_create"
-    ascend_file: "lmcache_ascend/v1/blend/"
-
-  # 7. Token database
-  - module: "lmcache/v1/token_database.py"
-    type: "function_replace"
-    description: "Token hashing with ASLR workaround"
-    watch_functions:
-      - "TokenDatabase._hash_tokens"
-
-  # 8. NUMA detection
-  - module: "lmcache/v1/system_detection.py"
-    type: "function_replace"
-    description: "NUMA detector with Ascend hardware sanitization"
-    watch_functions:
-      - "NUMADetector._read_from_sys"
-
-  # 9. Cache engine builder
+  # 5. Cache Engine (AscendLMCacheEngine subclass added in v0.4.3)
   - module: "lmcache/v1/cache_engine.py"
     type: "class_inheritance"
     description: "LMCacheEngine and LMCacheEngineBuilder"
@@ -119,4 +121,122 @@ patch_points:
           - "__init__"
           - "store"
           - "retrieve"
+          - "lookup"
+          - "lookup_unpin"
+          - "close"
     ascend_file: "lmcache_ascend/v1/cache_engine.py"
+
+  # 6. Metadata (renamed LMCacheEngineMetadata -> LMCacheMetadata in v0.4.2)
+  - module: "lmcache/v1/metadata.py"
+    type: "class_inheritance"
+    description: "LMCacheMetadata (was LMCacheEngineMetadata)"
+    watch_classes:
+      - class: "LMCacheMetadata"
+        watch_methods:
+          - "__init__"
+          - "get_shapes"
+          - "get_dtypes"
+    ascend_file: "lmcache_ascend/__init__.py"
+
+  # 7. CacheBlend
+  - module: "lmcache/v1/compute/blend/"
+    type: "class_inheritance"
+    description: "CacheBlend builder and blender"
+    watch_classes:
+      - class: "LMCBlenderBuilder"
+        watch_methods:
+          - "get_or_create"
+    ascend_file: "lmcache_ascend/v1/blend/"
+
+  # 8. Token database
+  - module: "lmcache/v1/token_database.py"
+    type: "function_replace"
+    description: "Token hashing with ASLR workaround"
+    watch_functions:
+      - "TokenDatabase._hash_tokens"
+
+  # 9. NUMA detection
+  - module: "lmcache/v1/system_detection.py"
+    type: "function_replace"
+    description: "NUMA detector with Ascend hardware sanitization"
+    watch_functions:
+      - "NUMADetector._read_from_sys"
+
+  # 10. RPC utils (signature changed in v0.4.2)
+  - module: "lmcache/v1/rpc_utils.py"
+    type: "function_replace"
+    description: "RPC utilities for inter-process communication"
+    watch_functions:
+      - "get_zmq_rpc_path_lmcache"
+    ascend_file: "lmcache_ascend/v1/rpc_utils.py"
+
+  # 11. Lookup client (transport API rewritten in v0.4.2)
+  - module: "lmcache/v1/lookup_client/"
+    type: "class_inheritance"
+    description: "Lookup client for cache lookups"
+    watch_classes:
+      - class: "LMCacheLookupClient"
+        watch_methods:
+          - "__init__"
+          - "lookup"
+    ascend_file: "lmcache_ascend/v1/lookup_client/"
+
+  # 12. Storage backend
+  - module: "lmcache/v1/storage_backend/"
+    type: "class_inheritance"
+    description: "Storage backend interfaces and implementations"
+    watch_classes:
+      - class: "StorageManager"
+        watch_methods:
+          - "allocate"
+          - "put"
+          - "batched_put"
+    ascend_file: "lmcache_ascend/v1/storage_backend/"
+
+  # 13. Proxy memory obj (parent() method added in v0.4.2)
+  - module: "lmcache/v1/proxy_memory_obj.py"
+    type: "class_inheritance"
+    description: "ProxyMemoryObj - reference-counted memory object"
+    watch_classes:
+      - class: "ProxyMemoryObj"
+        watch_methods:
+          - "parent"
+          - "ref_count_down"
+    ascend_file: "lmcache_ascend/v1/proxy_memory_obj.py"
+
+  # 14. Config (config definitions injected by Ascend)
+  - module: "lmcache/v1/config.py"
+    type: "function_replace"
+    description: "LMCache engine configuration - Ascend injects extra config fields"
+    watch_functions:
+      - "_CONFIG_DEFINITIONS"
+      - "_validate_config"
+    ascend_file: "lmcache_ascend/__init__.py"
+
+  # 15. LMCacheManager (refactored in v0.4.3)
+  - module: "lmcache/v1/manager.py"
+    type: "class_inheritance"
+    description: "LMCacheManager - coordinates engine lifecycle"
+    watch_classes:
+      - class: "LMCacheManager"
+        watch_methods:
+          - "_create_lmcache_engine"
+    ascend_file: "lmcache_ascend/__init__.py"
+
+  # 16. Transfer channel (hcomm runtime)
+  - module: "lmcache/v1/transfer_channel/"
+    type: "class_inheritance"
+    description: "Transfer channel for distributed KV cache"
+    ascend_file: "lmcache_ascend/v1/transfer_channel/"
+
+  # 17. Multiprocess custom types (stride/storage_offset added in v0.4.2)
+  - module: "lmcache/v1/multiprocess/"
+    type: "class_inheritance"
+    description: "Multiprocess types for IPC"
+    ascend_file: "lmcache_ascend/v1/multiprocess/"
+
+  # 18. Blend utils (import path updated in v0.4.2)
+  - module: "lmcache/v1/compute/blend/utils.py"
+    type: "function_replace"
+    description: "Blend utilities"
+    ascend_file: "lmcache_ascend/v1/blend/utils.py"

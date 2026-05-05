@@ -112,22 +112,51 @@ class ReleaseChecker:
         return new_releases
 
     def get_downstream_current_version(self) -> Optional[str]:
-        """Get the current LMCache version tracked by LMCache-Ascend."""
-        repo = self.config["downstream"]["repo"]
-        url = f"{self.api_base}/repos/{repo}/contents/README.md"
-        resp = requests.get(url, timeout=30)
-        if resp.status_code != 200:
-            return self.upstream.get("min_version")
-        # Parse README to find tracked version
-        import base64
+        """Get the current LMCache version tracked by LMCache-Ascend.
 
-        content = base64.b64decode(resp.json()["content"]).decode()
-        # Look for version references in README
+        Reads LMCACHE_UPSTREAM_TAG from lmcache_ascend/__init__.py on the
+        downstream main branch.  Falls back to reading from a local checkout
+        or the config min_version.
+        """
+        # Try GitHub API first (no checkout needed)
+        import base64
         import re
 
-        matches = re.findall(r"lmcache[=><!~]+\s*(\d+\.\d+\.\d+)", content, re.IGNORECASE)
-        if matches:
-            return f"v{matches[0]}"
+        repo = self.config["downstream"]["repo"]
+        target_branch = self.config["downstream"]["target_branch"]
+        for file_path in ["lmcache_ascend/__init__.py", "lmcache_ascend/_version.py"]:
+            url = (
+                f"{self.api_base}/repos/{repo}/contents/{file_path}"
+                f"?ref={target_branch}"
+            )
+            try:
+                resp = requests.get(url, timeout=30)
+                if resp.status_code == 200:
+                    content = base64.b64decode(resp.json()["content"]).decode()
+                    match = re.search(
+                        r'LMCACHE_UPSTREAM_TAG\s*=\s*["\']?(v[\d.]+)["\']?',
+                        content,
+                    )
+                    if match:
+                        return match.group(1)
+            except Exception:
+                pass
+
+        # Try local checkout
+        downstream_path = Path(self.config["sync"]["downstream_checkout"])
+        init_file = downstream_path / "lmcache_ascend" / "__init__.py"
+        if init_file.exists():
+            try:
+                content = init_file.read_text()
+                match = re.search(
+                    r'LMCACHE_UPSTREAM_TAG\s*=\s*["\']?(v[\d.]+)["\']?',
+                    content,
+                )
+                if match:
+                    return match.group(1)
+            except Exception:
+                pass
+
         return self.upstream.get("min_version")
 
     def get_state_file_path(self) -> Path:
@@ -209,9 +238,23 @@ class ConflictAnalyzer:
         return True
 
     def get_upstream_diff(self, from_version: str, to_version: str) -> str:
-        """Get diff between two upstream versions for watched files."""
+        """Get diff between two upstream versions for watched files.
+
+        Returns the full git diff for files that match patch points,
+        plus a stat summary for all changed files.
+        """
         upstream_path = Path(self.config["sync"]["upstream_checkout"])
         watched_files = self._get_watched_files()
+
+        # Get full stat summary of all changes
+        stat_cmd = [
+            "git", "-C", str(upstream_path),
+            "diff", "--stat", f"{from_version}..{to_version}",
+        ]
+        stat_result = subprocess.run(stat_cmd, capture_output=True, text=True)
+        stat_summary = stat_result.stdout.strip()
+
+        # Get detailed diffs for watched files
         diffs = []
         for file_path in watched_files:
             cmd = [
@@ -221,7 +264,26 @@ class ConflictAnalyzer:
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.stdout.strip():
                 diffs.append(f"=== {file_path} ===\n{result.stdout}")
-        return "\n\n".join(diffs)
+
+        # Also check for new files added in to_version that match watched patterns
+        diff_names_cmd = [
+            "git", "-C", str(upstream_path),
+            "diff", "--name-status", f"{from_version}..{to_version}",
+        ]
+        names_result = subprocess.run(diff_names_cmd, capture_output=True, text=True)
+        new_files = []
+        for line in names_result.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2 and parts[0] == "A":
+                new_files.append(parts[1])
+
+        header = f"## Full Change Stat\n{stat_summary}\n"
+        if new_files:
+            header += f"\n## New Files Added\n" + "\n".join(f"- {f}" for f in new_files)
+
+        if diffs:
+            return header + "\n\n## Detailed Diffs (watched files)\n" + "\n\n".join(diffs)
+        return header
 
     def _get_watched_files(self) -> list[str]:
         """Extract list of upstream files to watch from patch_points config."""
@@ -259,7 +321,7 @@ class ConflictAnalyzer:
         return {
             "has_breaking_changes": len(conflicts) > 0,
             "conflicts": conflicts,
-            "diff_summary": diff[:5000],  # Truncate for API limits
+            "diff_summary": diff[:50000],  # Allow larger diffs for better LLM context
         }
 
     def _detect_conflicts(self, diff: str, to_version: str) -> list[dict]:
@@ -447,8 +509,10 @@ def main():
         logger.error("Failed to clone repositories")
         sys.exit(1)
 
-    # Determine from version
-    last_processed = checker.get_last_processed_version() or config["upstream"]["min_version"]
+    # Determine from version: prefer Ascend's current tracked version
+    ascend_version = checker.get_downstream_current_version()
+    last_processed = checker.get_last_processed_version() or ascend_version or config["upstream"]["min_version"]
+    logger.info(f"Ascend current version: {ascend_version}")
     logger.info(f"Comparing {last_processed} -> {target_version}")
 
     # Phase 1: Diff analysis
