@@ -212,7 +212,7 @@ class PRGenerator:
             lines = header_and_content.split("\n", 1)
             if len(lines) < 2:
                 continue
-            file_path = lines[0].strip()
+            file_path = lines[0].strip().rstrip(">").strip()
             content = lines[1]
             # Remove leading/trailing newlines from content
             content = content.strip("\n")
