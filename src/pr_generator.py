@@ -1,6 +1,6 @@
 """
 PR Generator - Uses LLM API to generate adaptation code and creates PRs.
-Supports OpenAI-compatible APIs (GLM, DeepSeek, etc.) and Anthropic Claude.
+Supports Anthropic-compatible APIs (Zhipu GLM) and OpenAI-compatible APIs.
 """
 
 import json
@@ -11,22 +11,27 @@ import textwrap
 from pathlib import Path
 from typing import Optional
 
-from openai import OpenAI
+import anthropic
 
 logger = logging.getLogger("lmcache-sync.pr_generator")
 
 
 class PRGenerator:
-    """Generate adaptation PRs using LLM API (OpenAI-compatible or Anthropic)."""
+    """Generate adaptation PRs using LLM API (Anthropic-compatible or OpenAI-compatible)."""
 
     def __init__(self, config: dict, patch_points: dict):
         self.config = config
         self.patch_points = patch_points
 
         llm_config = config.get("llm", {})
-        self.api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
-        self.base_url = llm_config.get("base_url", "https://open.bigmodel.cn/api/paas/v4")
-        self.model = llm_config.get("model", "glm-5.1")
+        self.api_key = (
+            os.environ.get("LLM_API_KEY")
+            or os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+        )
+        self.api_format = llm_config.get("api_format", "anthropic")
+        self.base_url = llm_config.get("base_url", "https://open.bigmodel.cn/api/anthropic")
+        self.model = llm_config.get("model", "GLM-5.1")
         self.max_tokens = llm_config.get("max_tokens", 8192)
 
     def generate(
@@ -45,7 +50,7 @@ class PRGenerator:
         - error: str (if failed)
         """
         if not self.api_key:
-            return {"success": False, "error": "LLM_API_KEY or OPENAI_API_KEY not set"}
+            return {"success": False, "error": "LLM_API_KEY or ANTHROPIC_AUTH_TOKEN not set"}
 
         # Read downstream source files for context
         downstream_path = Path(self.config["sync"]["downstream_checkout"])
@@ -60,28 +65,44 @@ class PRGenerator:
             ascend_sources, upstream_diff,
         )
 
-        # Call LLM API (OpenAI-compatible)
-        logger.info(f"Calling LLM API ({self.model}) to generate adaptation code...")
+        # Call LLM API
+        logger.info(f"Calling LLM API ({self.model} via {self.base_url})...")
         try:
-            client = OpenAI(
-                api_key=self.api_key,
-                base_url=self.base_url,
-            )
-            response = client.chat.completions.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            generated = response.choices[0].message.content
+            if self.api_format == "anthropic":
+                client = anthropic.Anthropic(
+                    api_key=self.api_key,
+                    base_url=self.base_url,
+                )
+                response = client.messages.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                generated = response.content[0].text
+            else:
+                from openai import OpenAI
+                client = OpenAI(
+                    api_key=self.api_key,
+                    base_url=self.base_url,
+                )
+                response = client.chat.completions.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                generated = response.choices[0].message.content
         except Exception as e:
             return {"success": False, "error": f"LLM API error: {e}"}
 
         # Parse the generated code
+        logger.info(f"LLM response length: {len(generated)} chars")
+        logger.debug(f"LLM response preview: {generated[:500]}")
         file_changes = self._parse_generated_code(generated)
         if not file_changes:
+            logger.error(f"Failed to parse generated code. Raw response:\n{generated[:2000]}")
             return {
                 "success": False,
-                "error": "Failed to parse generated code from Claude response",
+                "error": "Failed to parse generated code from LLM response",
             }
 
         # Apply changes and create PR
@@ -207,7 +228,7 @@ class PRGenerator:
     ) -> dict:
         """Apply file changes and create a pull request."""
         downstream_path = Path(self.config["sync"]["downstream_checkout"])
-        branch_name = f"{self.config['sync']['branch_prefix']}{to_version}"
+        branch_name = f"{self.config['sync']['pr'].get('branch_prefix', 'sync/upstream-')}{to_version}"
         target_branch = self.config["downstream"]["target_branch"]
 
         # Create branch
@@ -271,7 +292,7 @@ class PRGenerator:
         # Create PR via gh CLI
         pr_body = self._build_pr_body(to_version, analysis, rebase_result)
         title = self.config["sync"]["pr"]["title_template"].format(version=to_version)
-        labels = ",".join(self.config["sync"]["pr"].get("labels", []))
+        labels = self.config["sync"]["pr"].get("labels", [])
         draft = "--draft" if self.config["sync"]["pr"].get("draft", False) else ""
 
         cmd = [
@@ -282,8 +303,6 @@ class PRGenerator:
             "--head", branch_name,
             "--base", target_branch,
         ]
-        if labels:
-            cmd.extend(["--label", labels])
         if draft:
             cmd.append(draft)
 
@@ -293,7 +312,27 @@ class PRGenerator:
         )
 
         if result.returncode != 0:
-            return {"success": False, "error": f"PR creation failed: {result.stderr}"}
+            # Retry without labels if label error
+            if "not found" in result.stderr and labels:
+                logger.warning(f"Labels not found, retrying without labels")
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    env={**os.environ, "GH_TOKEN": os.environ.get("GITHUB_TOKEN", "")},
+                )
+
+        if result.returncode != 0:
+            # Save generated code locally even if PR creation fails
+            output_dir = Path("generated") / to_version
+            output_dir.mkdir(parents=True, exist_ok=True)
+            for rel_path, content in file_changes.items():
+                out_path = output_dir / rel_path
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(content)
+            logger.info(f"Generated code saved to {output_dir}/")
+            return {
+                "success": False,
+                "error": f"PR creation failed: {result.stderr}. Generated code saved to generated/{to_version}/",
+            }
 
         pr_url = result.stdout.strip()
         pr_number = pr_url.split("/")[-1] if pr_url else None

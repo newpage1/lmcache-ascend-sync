@@ -30,6 +30,7 @@ sync:
 
   # PR generation
   pr:
+    branch_prefix: "sync/upstream-"
     labels:
       - "automated-sync"
       - "upstream-adaptation"
@@ -37,17 +38,14 @@ sync:
     # Title template: {version} is replaced with upstream version
     title_template: "chore: adapt to upstream LMCache {version}"
 
-# LLM API for code generation (OpenAI-compatible)
-# Set via environment variable LLM_API_KEY or OPENAI_API_KEY
+# LLM API for code generation (Anthropic-compatible via Zhipu)
+# Set via environment variable LLM_API_KEY
 llm:
-  # GLM-5.1 via Zhipu API (default)
-  base_url: "https://open.bigmodel.cn/api/paas/v4"
-  model: "glm-5.1"
+  # Zhipu GLM-5.1 via Anthropic-compatible API (coding plan)
+  api_format: "anthropic"
+  base_url: "https://open.bigmodel.cn/api/anthropic"
+  model: "GLM-5.1"
   max_tokens: 8192
-  # To use other providers, change base_url and model:
-  # DeepSeek: base_url: "https://api.deepseek.com/v1", model: "deepseek-chat"
-  # OpenAI:   base_url: "https://api.openai.com/v1", model: "gpt-4o"
-  # Claude:   base_url: "https://api.anthropic.com/v1", model: "claude-sonnet-4-20250514"
 
 # Notification (optional)
 notification:
