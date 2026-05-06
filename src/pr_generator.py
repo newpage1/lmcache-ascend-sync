@@ -173,6 +173,11 @@ class PRGenerator:
             rebase_result.get("conflict_files", []), indent=2
         )
 
+        # Build per-file action list from conflicts
+        file_action_list = self._build_file_action_list(
+            analysis.get("conflicts", []), ascend_sources
+        )
+
         sources_section = ""
         for path, content in ascend_sources.items():
             sources_section += f"\n### {path}\n```python\n{content}\n```\n"
@@ -209,6 +214,11 @@ class PRGenerator:
             {conflicts_text}
             ```
 
+            ## Per-File Action Plan
+            Based on the conflicts detected, here are the files that need changes:
+
+            {file_action_list}
+
             ## Rebase Simulation Conflicts
             ```json
             {rebase_conflicts}
@@ -223,8 +233,8 @@ class PRGenerator:
             {sources_section}
 
             ## Instructions
-            1. Study the upstream diff carefully to understand what API changes were made.
-            2. For each file in LMCache-Ascend that needs adaptation:
+            1. You MUST output EVERY file listed in the "Per-File Action Plan" above. Do NOT skip any.
+            2. For each file:
                a. If an import path changed upstream, update the Ascend import to match
                b. If a method signature changed, update the Ascend override to match
                c. If a new abstract method was added upstream, add a compatible Ascend implementation
@@ -233,6 +243,7 @@ class PRGenerator:
             4. Preserve the `store_async` feature (AscendLMCacheEngine background thread)
             5. Update `LMCACHE_UPSTREAM_TAG` in `__init__.py` to `{to_version}`
             6. Do NOT remove any Ascend-only features or workarounds
+            7. Output the COMPLETE file content for each file — do not use "..." or truncation
 
             ## Output Format
             For each file that needs changes, output EXACTLY:
@@ -241,9 +252,92 @@ class PRGenerator:
             # complete file content here
             <<<END>>>
 
-            IMPORTANT: File paths MUST start with `lmcache_ascend/` (not just the filename).
-            Only output files that need changes. Do not output unchanged files.
+            IMPORTANT:
+            - File paths MUST start with `lmcache_ascend/` (not just the filename).
+            - Output EVERY file from the action plan, not just one.
+            - Output complete files — do not truncate or abbreviate.
         """)
+
+    def _build_file_action_list(
+        self, conflicts: list[dict], ascend_sources: dict[str, str]
+    ) -> str:
+        """Build a per-file action list from detected conflicts."""
+        # Map conflict modules to Ascend files
+        file_actions = {}
+        for conflict in conflicts:
+            module = conflict.get("module", "")
+            ctype = conflict.get("type", "")
+            desc = conflict.get("description", "")
+
+            # Map upstream module to Ascend file(s)
+            ascend_files = self._map_conflict_to_ascend_files(module, conflict)
+            for af in ascend_files:
+                if af not in file_actions:
+                    file_actions[af] = []
+                file_actions[af].append(f"[{ctype}] {desc}")
+
+        if not file_actions:
+            return "No specific file actions identified. Review the upstream diff and update any affected files."
+
+        lines = []
+        for filepath, actions in sorted(file_actions.items()):
+            lines.append(f"\n### {filepath}")
+            for action in actions:
+                lines.append(f"  - {action}")
+
+        return "\n".join(lines)
+
+    def _map_conflict_to_ascend_files(
+        self, module: str, conflict: dict
+    ) -> list[str]:
+        """Map an upstream module conflict to Ascend files that need updates."""
+        # Direct mappings based on patch_points.yaml
+        module_to_ascend = {
+            "lmcache/v1/gpu_connector/gpu_connectors.py": [
+                "lmcache_ascend/v1/npu_connector/npu_connectors.py",
+                "lmcache_ascend/__init__.py",
+            ],
+            "lmcache/v1/gpu_connector/utils.py": [
+                "lmcache_ascend/v1/npu_connector/utils.py",
+            ],
+            "lmcache/v1/gpu_connector/__init__.py": [
+                "lmcache_ascend/v1/npu_connector/__init__.py",
+                "lmcache_ascend/__init__.py",
+            ],
+            "lmcache/v1/cache_engine.py": [
+                "lmcache_ascend/v1/cache_engine.py",
+                "lmcache_ascend/__init__.py",
+            ],
+            "lmcache/v1/config.py": [
+                "lmcache_ascend/__init__.py",
+            ],
+            "lmcache/integration/vllm/vllm_v1_adapter.py": [
+                "lmcache_ascend/integration/vllm/vllm_v1_adapter.py",
+                "lmcache_ascend/__init__.py",
+            ],
+            "lmcache/v1/memory_management.py": [
+                "lmcache_ascend/v1/memory_management.py",
+            ],
+            "lmcache/v1/storage_backend/": [
+                "lmcache_ascend/v1/storage_backend/",
+            ],
+            "lmcache/v1/rpc_utils.py": [
+                "lmcache_ascend/v1/rpc_utils.py",
+            ],
+            "lmcache/v1/metadata.py": [
+                "lmcache_ascend/__init__.py",
+            ],
+            "lmcache/v1/manager.py": [
+                "lmcache_ascend/__init__.py",
+            ],
+        }
+
+        ascend_files = module_to_ascend.get(module, [])
+        if not ascend_files:
+            # Default: __init__.py handles most patching
+            ascend_files = ["lmcache_ascend/__init__.py"]
+
+        return ascend_files
 
     def _parse_generated_code(self, generated: str) -> dict[str, str]:
         """Parse the FILE blocks from LLM response."""
@@ -287,11 +381,15 @@ class PRGenerator:
         branch_name = f"{self.config['sync']['pr'].get('branch_prefix', 'sync/upstream-')}{to_version}"
         target_branch = self.config["downstream"]["target_branch"]
 
-        # Create branch
+        # Create branch from target_branch (delete old branch if exists)
         subprocess.run(
             ["git", "-C", str(downstream_path), "checkout", target_branch],
             capture_output=True,
             check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(downstream_path), "branch", "-D", branch_name],
+            capture_output=True,
         )
         subprocess.run(
             ["git", "-C", str(downstream_path), "checkout", "-b", branch_name],
@@ -337,7 +435,7 @@ class PRGenerator:
                 capture_output=True,
             )
             result = subprocess.run(
-                ["git", "-C", str(downstream_path), "push", "fork", branch_name],
+                ["git", "-C", str(downstream_path), "push", "fork", branch_name, "--force"],
                 capture_output=True,
                 text=True,
             )
@@ -349,7 +447,7 @@ class PRGenerator:
                 capture_output=True,
             )
             result = subprocess.run(
-                ["git", "-C", str(downstream_path), "push", "origin", branch_name],
+                ["git", "-C", str(downstream_path), "push", "origin", branch_name, "--force"],
                 capture_output=True,
                 text=True,
             )
@@ -391,6 +489,19 @@ class PRGenerator:
         )
 
         if result.returncode != 0:
+            # Check if PR already exists for this branch — that's OK, force-push already updated it
+            if "already exists" in result.stderr:
+                import re
+                url_match = re.search(r'(https://github\.com/[^\s]+/pull/\d+)', result.stderr)
+                existing_url = url_match.group(1) if url_match else None
+                pr_number_match = re.search(r'/pull/(\d+)', result.stderr) if existing_url else None
+                existing_number = int(pr_number_match.group(1)) if pr_number_match else None
+                logger.info(f"PR already exists: {existing_url}. Branch was force-pushed, PR is updated.")
+                return {
+                    "success": True,
+                    "pr_url": existing_url,
+                    "pr_number": existing_number,
+                }
             # Retry without labels if label error
             if "not found" in result.stderr and labels:
                 logger.warning(f"Labels not found, retrying without labels")

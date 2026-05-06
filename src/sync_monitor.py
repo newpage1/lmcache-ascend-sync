@@ -509,15 +509,16 @@ def main():
         logger.error("Failed to clone repositories")
         sys.exit(1)
 
-    # Determine from version: prefer Ascend's current tracked version
+    # Determine from version: ALWAYS use Ascend's current tracked version
+    # This is the version in lmcache_ascend/__init__.py LMCACHE_UPSTREAM_TAG
     ascend_version = checker.get_downstream_current_version()
-    last_processed = checker.get_last_processed_version() or ascend_version or config["upstream"]["min_version"]
+    from_version = ascend_version or config["upstream"]["min_version"]
     logger.info(f"Ascend current version: {ascend_version}")
-    logger.info(f"Comparing {last_processed} -> {target_version}")
+    logger.info(f"Comparing {from_version} -> {target_version}")
 
     # Phase 1: Diff analysis
     logger.info("Running conflict analysis...")
-    analysis = analyzer.analyze_changes(last_processed, target_version)
+    analysis = analyzer.analyze_changes(from_version, target_version)
     logger.info(f"Breaking changes detected: {analysis['has_breaking_changes']}")
     if analysis["conflicts"]:
         for c in analysis["conflicts"]:
@@ -539,7 +540,7 @@ def main():
 
     pr_gen = PRGenerator(config, patch_points)
     result = pr_gen.generate(
-        from_version=last_processed,
+        from_version=from_version,
         to_version=target_version,
         analysis=analysis,
         rebase_result=rebase_result,
