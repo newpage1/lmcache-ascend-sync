@@ -1,0 +1,76 @@
+# Deterministic transform rules for LMCache-Ascend adaptation
+# Each rule describes a mechanical code transformation that doesn't need LLM.
+# Rules are applied in order; first match wins.
+
+rules:
+  # === Cross-version general rules ===
+
+  - name: "cuda_to_npu_device"
+    type: "replace"
+    pattern: "torch.cuda.is_available()"
+    replacement: "torch.npu.is_available()"
+    scope: "ascend_only"
+    description: "CUDA availability check → NPU"
+
+  - name: "cuda_to_npu_device_call"
+    type: "replace"
+    pattern: "torch.cuda.current_device()"
+    replacement: "torch.npu.current_device()"
+    scope: "ascend_only"
+    description: "CUDA device call → NPU"
+
+  # === v0.4.4 specific rules ===
+
+  - name: "assert_vllm_mla_support"
+    type: "rename"
+    pattern: "assert_is_vllm_flash_attn_or_flash_infer"
+    replacement: "assert_is_vllm_mla_or_flash_attn_or_flash_infer"
+    files:
+      - "lmcache_ascend/v1/npu_connector/npu_connectors.py"
+    description: "v0.4.4: Assertion function adds MLA support"
+
+  - name: "import_unguard_c_ops"
+    type: "import_unguard"
+    pattern: 'if torch.cuda.is_available():\n    import lmcache.c_ops'
+    replacement: "import lmcache.c_ops"
+    files:
+      - "lmcache_ascend/v1/npu_connector/npu_connectors.py"
+    description: "v0.4.4: Remove CUDA guard from c_ops import"
+
+  - name: "is_tuple_to_separate_format"
+    type: "rename"
+    pattern: "is_tuple_format"
+    replacement: "is_separate_format"
+    files:
+      - "lmcache_ascend/v1/npu_connector/npu_connectors.py"
+    description: "v0.4.4: is_tuple_format → is_separate_format"
+
+  - name: "memory_format_mla_conditional"
+    type: "conditional_replace"
+    pattern: 'MemoryFormat.KV_T2D'
+    replacement: 'MemoryFormat.KV_MLA_FMT if self.use_mla else MemoryFormat.KV_T2D'
+    files:
+      - "lmcache_ascend/v1/npu_connector/npu_connectors.py"
+    context_within: "def "
+    description: "v0.4.4: MemoryFormat dynamically selected based on use_mla"
+
+  - name: "config_gds_rename"
+    type: "config_rename"
+    old_field: "cufile_buffer_size"
+    new_field: "gds_buffer_size"
+    target_file: "lmcache_ascend/__init__.py"
+    description: "v0.4.4: cufile_buffer_size → gds_buffer_size rename"
+
+  - name: "config_new_fields_v044"
+    type: "config_add"
+    fields:
+      - name: "local_disk_path_sharding"
+        definition: '{"type": str, "default": "by_gpu"}'
+      - name: "pd_skip_proxy_notification"
+        definition: '{"type": bool, "default": False}'
+      - name: "use_gds"
+        definition: '{"type": bool, "default": False}'
+      - name: "gds_backend"
+        definition: '{"type": str, "default": "cufile"}'
+    target_file: "lmcache_ascend/__init__.py"
+    description: "v0.4.4: New config fields for GDS and disk sharding"

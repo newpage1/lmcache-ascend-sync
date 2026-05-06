@@ -13,6 +13,11 @@ from typing import Optional
 
 import anthropic
 
+from .verifier import ChangeVerifier
+from .change_classifier import ChangeClassifier, ChangeType
+from .deterministic_transform import DeterministicTransformer
+from .method_patcher import MethodPatcher
+
 logger = logging.getLogger("lmcache-sync.pr_generator")
 
 
@@ -43,6 +48,12 @@ class PRGenerator:
     ) -> dict:
         """Generate adaptation code and create a PR.
 
+        Uses a 4-phase pipeline:
+        1. Change classification (deterministic vs LLM-needed)
+        2. Deterministic transforms (string replacements, config injection)
+        3. Method-level LLM patching (only for complex changes)
+        4. Verification + PR creation
+
         Returns dict with:
         - success: bool
         - pr_url: str (if success)
@@ -52,60 +63,111 @@ class PRGenerator:
         if not self.api_key:
             return {"success": False, "error": "LLM_API_KEY or ANTHROPIC_AUTH_TOKEN not set"}
 
-        # Read downstream source files for context
+        # Read current Ascend source files
         downstream_path = Path(self.config["sync"]["downstream_checkout"])
         ascend_sources = self._read_ascend_sources(downstream_path)
 
         # Read the upstream diff
         upstream_diff = analysis.get("diff_summary", "")
 
-        # Build the prompt
-        prompt = self._build_prompt(
-            from_version, to_version, analysis, rebase_result,
-            ascend_sources, upstream_diff,
+        # ===== Phase 1: Classify upstream changes =====
+        logger.info("Phase 1: Classifying upstream changes...")
+        classifier = ChangeClassifier(
+            patch_points_path=str(
+                Path(self.config.get("patch_points_path", "config/patch_points.yaml"))
+            )
+        )
+        classified = classifier.classify_diff(upstream_diff)
+
+        # Separate deterministic vs LLM-needed changes
+        deterministic_types = {
+            ChangeType.MECHANICAL_RENAME,
+            ChangeType.IMPORT_CHANGE,
+            ChangeType.CONFIG_ADDITION,
+        }
+        llm_types = {
+            ChangeType.LOGIC_CHANGE,
+            ChangeType.PARAM_CHANGE,
+            ChangeType.NEW_METHOD,
+            ChangeType.NEW_CLASS,
+        }
+
+        deterministic_changes = [c for c in classified if c.change_type in deterministic_types]
+        llm_changes = [c for c in classified if c.change_type in llm_types]
+
+        logger.info(
+            f"  Deterministic changes: {len(deterministic_changes)}, "
+            f"LLM-needed changes: {len(llm_changes)}"
         )
 
-        # Call LLM API
-        logger.info(f"Calling LLM API ({self.model} via {self.base_url})...")
-        try:
-            if self.api_format == "anthropic":
-                client = anthropic.Anthropic(
-                    api_key=self.api_key,
-                    base_url=self.base_url,
-                )
-                response = client.messages.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                generated = response.content[0].text
-            else:
-                from openai import OpenAI
-                client = OpenAI(
-                    api_key=self.api_key,
-                    base_url=self.base_url,
-                )
-                response = client.chat.completions.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                generated = response.choices[0].message.content
-        except Exception as e:
-            return {"success": False, "error": f"LLM API error: {e}"}
+        # ===== Phase 2: Apply deterministic transforms =====
+        logger.info("Phase 2: Applying deterministic transforms...")
+        transformer = DeterministicTransformer()
+        deterministic_results = transformer.transform(ascend_sources, deterministic_changes)
 
-        # Parse the generated code
-        logger.info(f"LLM response length: {len(generated)} chars")
-        logger.debug(f"LLM response preview: {generated[:500]}")
-        file_changes = self._parse_generated_code(generated)
+        # Build working copy of sources with deterministic changes applied
+        working_sources = dict(ascend_sources)
+        working_sources.update(deterministic_results)
+
+        # Also update the version tag
+        init_file = "lmcache_ascend/__init__.py"
+        if init_file in working_sources:
+            working_sources[init_file] = self._update_version_tag(
+                working_sources[init_file], to_version
+            )
+
+        # ===== Phase 3: Method-level LLM patching =====
+        if llm_changes:
+            logger.info(f"Phase 3: Method-level LLM patching ({len(llm_changes)} changes)...")
+            try:
+                # Read upstream sources for before/after comparison
+                upstream_before, upstream_after = self._read_upstream_sources(
+                    from_version, to_version, analysis
+                )
+                patcher = MethodPatcher(
+                    api_key=self.api_key,
+                    base_url=self.base_url,
+                    model=self.model,
+                    max_tokens=min(self.max_tokens, 4096),  # Smaller for method-level
+                )
+                llm_results = patcher.patch_methods(
+                    working_sources, llm_changes,
+                    upstream_before, upstream_after,
+                )
+                working_sources.update(llm_results)
+            except Exception as e:
+                logger.warning(f"Method-level patching failed: {e}, continuing with deterministic only")
+
+        # Collect only the files that actually changed
+        file_changes = {}
+        for filepath, content in working_sources.items():
+            original = ascend_sources.get(filepath, "")
+            if content != original:
+                file_changes[filepath] = content
+
         if not file_changes:
-            logger.error(f"Failed to parse generated code. Raw response:\n{generated[:2000]}")
+            logger.info("No changes needed — upstream diff doesn't affect Ascend")
             return {
-                "success": False,
-                "error": "Failed to parse generated code from LLM response",
+                "success": True,
+                "pr_url": None,
+                "pr_number": None,
+                "message": "No adaptation needed for this version",
             }
 
-        # Apply changes and create PR
+        logger.info(f"Total changes: {len(file_changes)} files modified")
+
+        # ===== Phase 4: Verify + Create PR =====
+        verifier = ChangeVerifier()
+        report = verifier.verify(ascend_sources, file_changes)
+        logger.info(f"Verification report:\n{report.summary()}")
+
+        if not report.passed:
+            self._save_failed_generation(to_version, file_changes, report)
+            return {
+                "success": False,
+                "error": f"Verification failed:\n{report.summary()}",
+            }
+
         return self._create_pr(to_version, file_changes, analysis, rebase_result)
 
     def _read_ascend_sources(self, downstream_path: Path) -> dict[str, str]:
@@ -157,6 +219,57 @@ class PRGenerator:
                     pass
 
         return sources
+
+    @staticmethod
+    def _update_version_tag(source: str, new_version: str) -> str:
+        """Update LMCACHE_UPSTREAM_TAG in __init__.py."""
+        import re
+        pattern = re.compile(r'LMCACHE_UPSTREAM_TAG\s*=\s*"[^"]*"')
+        new_tag = f'LMCACHE_UPSTREAM_TAG = "{new_version}"'
+        return pattern.sub(new_tag, source)
+
+    def _read_upstream_sources(
+        self, from_version: str, to_version: str, analysis: dict
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """Read upstream source files at two versions for method comparison."""
+        import subprocess
+        import tempfile
+
+        upstream_path = analysis.get("upstream_checkout")
+        if not upstream_path:
+            return {}, {}
+
+        upstream_dir = Path(upstream_path)
+        before = {}
+        after = {}
+
+        # Read files at 'to' version (current checkout)
+        for module in [
+            "lmcache/v1/gpu_connector/gpu_connectors.py",
+            "lmcache/v1/cache_engine.py",
+            "lmcache/v1/config.py",
+            "lmcache/v1/memory_management.py",
+        ]:
+            filepath = upstream_dir / module
+            if filepath.exists():
+                try:
+                    after[module] = filepath.read_text()
+                except Exception:
+                    pass
+
+            # Read 'from' version via git show
+            try:
+                result = subprocess.run(
+                    ["git", "-C", str(upstream_dir), "show",
+                     f"{from_version}:{module}"],
+                    capture_output=True, text=True,
+                )
+                if result.returncode == 0:
+                    before[module] = result.stdout
+            except Exception:
+                pass
+
+        return before, after
 
     def _build_prompt(
         self,
@@ -368,6 +481,25 @@ class PRGenerator:
 
             file_changes[file_path] = content
         return file_changes
+
+    def _save_failed_generation(
+        self,
+        to_version: str,
+        file_changes: dict[str, str],
+        report,
+    ) -> None:
+        """Save generated code and verification report when verification fails."""
+        output_dir = Path("generated") / to_version / "failed"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        for rel_path, content in file_changes.items():
+            out_path = output_dir / rel_path
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(content)
+
+        report_path = output_dir / "verification_report.txt"
+        report_path.write_text(report.summary())
+        logger.info(f"Failed generation saved to {output_dir}/")
 
     def _create_pr(
         self,
