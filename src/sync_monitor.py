@@ -13,7 +13,6 @@ Usage:
 """
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -158,32 +157,6 @@ class ReleaseChecker:
                 pass
 
         return self.upstream.get("min_version")
-
-    def get_state_file_path(self) -> Path:
-        """Path to the state file tracking last processed version."""
-        return Path(__file__).parent.parent / "state.json"
-
-    def get_last_processed_version(self) -> Optional[str]:
-        """Read the last processed upstream version from state file."""
-        state_path = self.get_state_file_path()
-        if state_path.exists():
-            with open(state_path) as f:
-                state = json.load(f)
-                return state.get("last_processed_version")
-        return None
-
-    def save_state(self, version: str, status: str, details: dict = None):
-        """Save processing state."""
-        state = {
-            "last_processed_version": version,
-            "last_status": status,
-            "last_run": __import__("datetime").datetime.utcnow().isoformat(),
-        }
-        if details:
-            state["details"] = details
-        state_path = self.get_state_file_path()
-        with open(state_path, "w") as f:
-            json.dump(state, f, indent=2)
 
 
 class ConflictAnalyzer:
@@ -475,7 +448,7 @@ def main():
         latest = checker.get_latest_release()
         if latest:
             logger.info(f"Latest upstream release: {latest['tag_name']}")
-            last_processed = checker.get_last_processed_version()
+            last_processed = checker.get_downstream_current_version()
             if last_processed:
                 logger.info(f"Last processed: {last_processed}")
                 if latest["tag_name"] == last_processed:
@@ -496,7 +469,7 @@ def main():
             logger.error("Could not fetch latest release")
             sys.exit(1)
 
-        last_processed = checker.get_last_processed_version()
+        last_processed = checker.get_downstream_current_version()
         target_version = latest["tag_name"]
 
         if last_processed and target_version == last_processed:
@@ -530,8 +503,7 @@ def main():
     logger.info(f"Rebase conflicts: {len(rebase_result.get('conflict_files', []))}")
 
     if not analysis["has_breaking_changes"] and not rebase_result["has_conflicts"]:
-        logger.info("No breaking changes detected. Updating state.")
-        checker.save_state(target_version, "no_changes")
+        logger.info(f"No breaking changes detected for {target_version}.")
         return
 
     # Phase 3: Generate adaptation PR (invoke PR generator)
@@ -547,14 +519,8 @@ def main():
     )
 
     if result.get("success"):
-        checker.save_state(
-            target_version,
-            "pr_created",
-            {"pr_url": result.get("pr_url"), "pr_number": result.get("pr_number")},
-        )
         logger.info(f"PR created: {result.get('pr_url')}")
     else:
-        checker.save_state(target_version, "failed", {"error": result.get("error")})
         logger.error(f"Failed to create PR: {result.get('error')}")
 
 
